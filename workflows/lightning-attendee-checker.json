@@ -1,0 +1,459 @@
+{
+  "name": "Lightning Fast Supabase Attendee Checker",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ghl-webhook-attendance",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "GHL Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse and validate GHL webhook data\nconst startTime = Date.now();\n\n// Get webhook data (new direct format)\nconst data = $input.first().json;\nconst email = data?.email;\nconst contactId = data?.contact_id;\nconst webinarId = data?.webinar_id || 13;\nconst scheduleId = data?.schedule_id;\nconst firstName = data?.first_name;\nconst phone = data?.phone;\nconst selectedLabel = data?.selected_label;\nconst webinarDate = data?.webinar_date;\n\n// Validate required data\nif (!email) {\n  throw new Error('❌ No email found in webhook data');\n}\n\nif (!contactId) {\n  throw new Error('❌ No contact_id found in webhook data');\n}\n\nif (!webinarId) {\n  throw new Error('❌ No webinar_id found in webhook data');\n}\n\n// Log received data\nconsole.log('🎯 WEBHOOK RECEIVED');\nconsole.log(`📧 Email: ${email}`);\nconsole.log(`👤 Contact ID: ${contactId}`);\nconsole.log(`🎪 Webinar ID: ${webinarId}`);\nconsole.log(`📅 Schedule ID: ${scheduleId}`);\nconsole.log(`👋 Name: ${firstName}`);\nconsole.log(`📱 Phone: ${phone}`);\nconsole.log(`🏷️ Label: ${selectedLabel}`);\nconsole.log(`📆 Date: ${webinarDate}`);\n\nreturn {\n  json: {\n    email: email.toLowerCase().trim(),\n    contact_id: contactId,\n    webinar_id: parseInt(webinarId),\n    schedule_id: scheduleId ? parseInt(scheduleId) : null,\n    first_name: firstName,\n    phone: phone,\n    selected_label: selectedLabel,\n    webinar_date: webinarDate,\n    webhook_received_at: new Date().toISOString(),\n    performance: {\n      processing_start: startTime,\n      step: 'webhook_parsed'\n    }\n  }\n};"
+      },
+      "id": "parse-webhook",
+      "name": "Parse Webhook Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=-- Lightning-fast attendance lookup via indexed database query\nWITH attendance_lookup AS (\n  SELECT \n    id,\n    webinarjam_id,\n    email,\n    first_name,\n    last_name,\n    webinar_name,\n    webinar_id,\n    schedule_id,\n    event_date,\n    attended_live,\n    date_live,\n    time_live,\n    purchased_live,\n    revenue_live,\n    attended_replay,\n    purchased_replay,\n    revenue_replay,\n    created_at,\n    last_synced_at,\n    \n    -- Performance tracking\n    EXTRACT(EPOCH FROM NOW()) * 1000 as query_start_ms\n  FROM webinar_registrants \n  WHERE email = '{{ $json.email }}'\n    {% if $json.webinar_id %}AND webinar_id = {{ $json.webinar_id }}{% endif %}\n    {% if $json.schedule_id %}AND schedule_id = {{ $json.schedule_id }}{% endif %}\n  ORDER BY event_date DESC, created_at DESC\n  LIMIT 1\n)\nSELECT \n  *,\n  CASE \n    WHEN attended_live = true THEN 'attended'\n    WHEN attended_live = false THEN 'no_show'\n    ELSE 'unknown'\n  END as attendance_status,\n  \n  -- Determine tag actions\n  CASE \n    WHEN attended_live = true THEN 'Attended Webinar'\n    ELSE 'No Show Webinar'\n  END as tag_to_add,\n  \n  CASE \n    WHEN attended_live = true THEN 'No Show Webinar'\n    ELSE 'Attended Webinar'\n  END as tag_to_remove,\n  \n  -- Performance calculation\n  (EXTRACT(EPOCH FROM NOW()) * 1000 - query_start_ms) as query_time_ms\n  \nFROM attendance_lookup;",
+        "options": {}
+      },
+      "id": "lightning-lookup",
+      "name": "⚡ Lightning Lookup",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        680,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "supabase-db",
+          "name": "Supabase Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "found-registrant",
+              "leftValue": "={{ $('lightning-lookup').item.json.email }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "isNotEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-found",
+      "name": "Registrant Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://services.leadconnectorhq.com/contacts/{{ $('parse-webhook').item.json.contact_id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "goHighLevelApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"tags\": [\n    \"{{ $('lightning-lookup').item.json.tag_to_add }}\"\n  ]\n}",
+        "options": {
+          "timeout": 10000,
+          "retry": {
+            "enabled": true,
+            "maxTries": 2
+          }
+        }
+      },
+      "id": "add-attendance-tag",
+      "name": "🏷️ Add Attendance Tag",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1120,
+        200
+      ],
+      "credentials": {
+        "goHighLevelApi": {
+          "id": "ghl-api",
+          "name": "GoHighLevel API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "=https://services.leadconnectorhq.com/contacts/{{ $('parse-webhook').item.json.contact_id }}/tags",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "goHighLevelApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"tags\": [\n    \"{{ $('lightning-lookup').item.json.tag_to_remove }}\"\n  ]\n}",
+        "options": {
+          "timeout": 10000,
+          "retry": {
+            "enabled": true,
+            "maxTries": 2
+          }
+        }
+      },
+      "id": "remove-old-tag",
+      "name": "🗑️ Remove Old Tag",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1340,
+        200
+      ],
+      "credentials": {
+        "goHighLevelApi": {
+          "id": "ghl-api",
+          "name": "GoHighLevel API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=-- Log successful attendance check\nINSERT INTO attendance_checks (\n  registrant_id,\n  ghl_contact_id,\n  email,\n  webinar_id,\n  schedule_id,\n  event_date,\n  attended,\n  attendance_status,\n  tag_added,\n  tag_removed,\n  response_time_ms\n) VALUES (\n  {{ $('lightning-lookup').item.json.id }},\n  '{{ $('parse-webhook').item.json.contact_id }}',\n  '{{ $('lightning-lookup').item.json.email }}',\n  {{ $('lightning-lookup').item.json.webinar_id }},\n  {% if $('lightning-lookup').item.json.schedule_id %}{{ $('lightning-lookup').item.json.schedule_id }}{% else %}NULL{% endif %},\n  {% if $('lightning-lookup').item.json.event_date %}'{{ $('lightning-lookup').item.json.event_date }}'{% else %}NULL{% endif %},\n  {{ $('lightning-lookup').item.json.attended_live }},\n  '{{ $('lightning-lookup').item.json.attendance_status }}',\n  '{{ $('lightning-lookup').item.json.tag_to_add }}',\n  '{{ $('lightning-lookup').item.json.tag_to_remove }}',\n  {{ $('lightning-lookup').item.json.query_time_ms | round(0) }}\n) RETURNING id, checked_at;",
+        "options": {}
+      },
+      "id": "log-success",
+      "name": "📊 Log Success",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1560,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "supabase-db",
+          "name": "Supabase Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Create success response with performance metrics\nconst webhookData = $('parse-webhook').item.json;\nconst lookupData = $('lightning-lookup').item.json;\nconst logData = $('log-success').item.json;\n\nconst totalTime = Date.now() - webhookData.performance.processing_start;\nconst queryTime = lookupData.query_time_ms || 0;\n\nconst response = {\n  success: true,\n  message: `✅ Contact successfully tagged as '${lookupData.attendance_status}'`,\n  \n  contact: {\n    email: lookupData.email,\n    ghl_contact_id: webhookData.contact_id,\n    first_name: lookupData.first_name,\n    last_name: lookupData.last_name\n  },\n  \n  webinar: {\n    name: lookupData.webinar_name,\n    webinar_id: lookupData.webinar_id,\n    schedule_id: lookupData.schedule_id,\n    event_date: lookupData.event_date\n  },\n  \n  attendance: {\n    status: lookupData.attendance_status,\n    attended_live: lookupData.attended_live,\n    date_live: lookupData.date_live,\n    time_live: lookupData.time_live,\n    purchased: lookupData.purchased_live,\n    revenue: lookupData.revenue_live || 0\n  },\n  \n  tagging: {\n    tag_added: lookupData.tag_to_add,\n    tag_removed: lookupData.tag_to_remove,\n    action_completed: true\n  },\n  \n  performance: {\n    total_time_ms: totalTime,\n    database_query_ms: Math.round(queryTime),\n    api_calls_completed: 2,\n    status: totalTime < 1000 ? '🚀 Lightning Fast' : totalTime < 3000 ? '⚡ Fast' : '🐌 Slow'\n  },\n  \n  tracking: {\n    check_id: logData.id,\n    processed_at: logData.checked_at,\n    registrant_id: lookupData.id\n  }\n};\n\nconsole.log('🎉 SUCCESS - Attendance Check Complete');\nconsole.log(`📧 ${lookupData.email} -> ${lookupData.attendance_status}`);\nconsole.log(`🏷️ Tagged: ${lookupData.tag_to_add}`);\nconsole.log(`🗑️ Removed: ${lookupData.tag_to_remove}`);\nconsole.log(`⚡ Performance: ${totalTime}ms (DB: ${Math.round(queryTime)}ms)`);\n\nreturn { json: response };"
+      },
+      "id": "success-response",
+      "name": "✅ Success Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=-- Log failed attendance check (registrant not found)\nINSERT INTO attendance_checks (\n  registrant_id,\n  ghl_contact_id,\n  email,\n  webinar_id,\n  schedule_id,\n  event_date,\n  attended,\n  attendance_status,\n  tag_added,\n  tag_removed,\n  response_time_ms\n) VALUES (\n  NULL,\n  '{{ $('parse-webhook').item.json.contact_id }}',\n  '{{ $('parse-webhook').item.json.email }}',\n  {% if $('parse-webhook').item.json.webinar_id %}{{ $('parse-webhook').item.json.webinar_id }}{% else %}NULL{% endif %},\n  {% if $('parse-webhook').item.json.schedule_id %}{{ $('parse-webhook').item.json.schedule_id }}{% else %}NULL{% endif %},\n  NULL,\n  NULL,\n  'not_found',\n  'Not Found - Manual Review',\n  NULL,\n  {{ Date.now() - $('parse-webhook').item.json.performance.processing_start }}\n) RETURNING id, checked_at;",
+        "options": {}
+      },
+      "id": "log-not-found",
+      "name": "📝 Log Not Found",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1120,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "supabase-db",
+          "name": "Supabase Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://services.leadconnectorhq.com/contacts/{{ $('parse-webhook').item.json.contact_id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "goHighLevelApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"tags\": [\n    \"Not Found - Manual Review\"\n  ]\n}",
+        "options": {
+          "timeout": 10000,
+          "retry": {
+            "enabled": true,
+            "maxTries": 2
+          }
+        }
+      },
+      "id": "tag-not-found",
+      "name": "🏷️ Tag: Not Found",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1340,
+        400
+      ],
+      "credentials": {
+        "goHighLevelApi": {
+          "id": "ghl-api",
+          "name": "GoHighLevel API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Create not found response\nconst webhookData = $('parse-webhook').item.json;\nconst logData = $('log-not-found').item.json;\n\nconst totalTime = Date.now() - webhookData.performance.processing_start;\n\nconst response = {\n  success: false,\n  message: `❌ Contact '${webhookData.email}' not found in webinar registrants`,\n  \n  contact: {\n    email: webhookData.email,\n    ghl_contact_id: webhookData.contact_id\n  },\n  \n  search_criteria: {\n    webinar_id: webhookData.webinar_id,\n    schedule_id: webhookData.schedule_id\n  },\n  \n  tagging: {\n    tag_added: 'Not Found - Manual Review',\n    reason: 'Contact not found in WebinarJam registrants database',\n    action_completed: true\n  },\n  \n  performance: {\n    total_time_ms: totalTime,\n    status: '⚡ Fast (No Match)'\n  },\n  \n  tracking: {\n    check_id: logData.id,\n    processed_at: logData.checked_at\n  },\n  \n  recommendations: [\n    'Check if contact registered with different email address',\n    'Verify webinar_id and schedule_id are correct',\n    'Ensure WebinarJam sync is up to date',\n    'Review contact manually in WebinarJam dashboard'\n  ]\n};\n\nconsole.log('❌ NOT FOUND - Contact not in registrants');\nconsole.log(`📧 ${webhookData.email}`);\nconsole.log(`🔍 Searched: webinar_id=${webhookData.webinar_id}, schedule_id=${webhookData.schedule_id}`);\nconsole.log(`🏷️ Tagged: Not Found - Manual Review`);\nconsole.log(`⚡ Performance: ${totalTime}ms`);\n\nreturn { json: response };"
+      },
+      "id": "not-found-response",
+      "name": "❌ Not Found Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2000,
+        300
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "webhook-trigger": {
+      "main": [
+        [
+          {
+            "node": "parse-webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "parse-webhook": {
+      "main": [
+        [
+          {
+            "node": "lightning-lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "lightning-lookup": {
+      "main": [
+        [
+          {
+            "node": "check-found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "check-found": {
+      "main": [
+        [
+          {
+            "node": "add-attendance-tag",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "log-not-found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "add-attendance-tag": {
+      "main": [
+        [
+          {
+            "node": "remove-old-tag",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "remove-old-tag": {
+      "main": [
+        [
+          {
+            "node": "log-success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "log-success": {
+      "main": [
+        [
+          {
+            "node": "success-response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "success-response": {
+      "main": [
+        [
+          {
+            "node": "webhook-response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "log-not-found": {
+      "main": [
+        [
+          {
+            "node": "tag-not-found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "tag-not-found": {
+      "main": [
+        [
+          {
+            "node": "not-found-response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "not-found-response": {
+      "main": [
+        [
+          {
+            "node": "webhook-response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "lightning-v2.0",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "id": "supabase-lightning-attendee-checker",
+  "tags": [
+    {
+      "createdAt": "2024-01-01T00:00:00.000Z",
+      "updatedAt": "2024-01-01T00:00:00.000Z",
+      "id": "attendee-checker",
+      "name": "attendee-checker"
+    },
+    {
+      "createdAt": "2024-01-01T00:00:00.000Z",
+      "updatedAt": "2024-01-01T00:00:00.000Z",
+      "id": "lightning-fast",
+      "name": "lightning-fast"
+    },
+    {
+      "createdAt": "2024-01-01T00:00:00.000Z",
+      "updatedAt": "2024-01-01T00:00:00.000Z",
+      "id": "supabase",
+      "name": "supabase"
+    },
+    {
+      "createdAt": "2024-01-01T00:00:00.000Z",
+      "updatedAt": "2024-01-01T00:00:00.000Z",
+      "id": "gohighlevel",
+      "name": "gohighlevel"
+    }
+  ]
+}

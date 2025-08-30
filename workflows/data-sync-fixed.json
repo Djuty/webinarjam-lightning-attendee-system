@@ -1,0 +1,226 @@
+{
+  "name": "EverWebinar Data Sync - CORRECTED",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ],
+      "id": "schedule-trigger",
+      "name": "Every 6 Hours"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.webinarjam.com/everwebinar/registrants",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "api_key",
+              "value": "99bf85a4-2e67-46a3-8679-6612d4d6b1b2"
+            },
+            {
+              "name": "webinar_id",
+              "value": "13"
+            },
+            {
+              "name": "page",
+              "value": "1"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        460,
+        300
+      ],
+      "id": "fetch-registrants",
+      "name": "Fetch EverWebinar Registrants"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Process EverWebinar registrants - CORRECTED for actual API response\n * Input: EverWebinar API response with registrants.data array\n * Output: Array of registrant objects ready for Supabase upsert\n */\n\nconst response = $input.first().json;\nconsole.log('🔍 Full API Response:', JSON.stringify(response, null, 2));\n\n// CORRECTED: Access registrants.data instead of just registrants\nconst registrantsData = response?.registrants?.data || [];\n\nif (!Array.isArray(registrantsData) || registrantsData.length === 0) {\n  console.log('❌ No registrants found in response');\n  console.log('Response structure:', Object.keys(response || {}));\n  if (response?.registrants) {\n    console.log('Registrants structure:', Object.keys(response.registrants));\n  }\n  return [{ json: { message: 'No registrants found', total: 0, debug: response } }];\n}\n\nconsole.log(`✅ Found ${registrantsData.length} registrants to process`);\n\n// Process each registrant with CORRECT field mapping\nconst processedRegistrants = registrantsData.map(reg => {\n  // Parse registration date (signup_date)\n  let registrationDate = null;\n  if (reg.signup_date) {\n    try {\n      registrationDate = new Date(reg.signup_date).toISOString();\n    } catch (e) {\n      console.log('Date parse error for signup_date:', reg.signup_date);\n    }\n  }\n\n  // Parse webinar event date\n  let webinarDate = null;\n  if (reg.event) {\n    try {\n      // Parse \"Mon, 25 Aug 2025, 08:30 PM\" format\n      const eventDate = new Date(reg.event);\n      if (!isNaN(eventDate.getTime())) {\n        webinarDate = eventDate.toISOString();\n      }\n    } catch (e) {\n      console.log('Event date parse error for:', reg.event);\n    }\n  }\n\n  // Combine phone country code and number\n  let fullPhone = '';\n  if (reg.phone_country_code && reg.phone_number) {\n    fullPhone = reg.phone_country_code + reg.phone_number;\n  } else if (reg.phone_number) {\n    fullPhone = reg.phone_number;\n  }\n\n  // Determine attendance status\n  const attendedLive = reg.attended_live === 'Yes';\n  const attendedReplay = reg.attended_replay === 'Yes';\n  const attended = attendedLive || attendedReplay;\n\n  return {\n    email: (reg.email || '').toLowerCase().trim(),\n    first_name: reg.first_name || '',\n    last_name: reg.last_name || '',\n    phone: fullPhone,\n    webinar_id: 13, // Fixed webinar ID\n    schedule_id: parseInt(reg.schedule_id) || 46,\n    registration_date: registrationDate,\n    webinar_date: webinarDate,\n    timezone: 'Europe/Amsterdam', // Default timezone\n    live_room_url: reg.links?.live_room || '',\n    replay_room_url: reg.links?.replay_room || '',\n    thank_you_url: '', // Not in API response\n    attended: attended,\n    attended_live: attendedLive,\n    attended_replay: attendedReplay,\n    event_id: parseInt(reg.event_id) || null,\n    lead_id: parseInt(reg.lead_id) || null,\n    last_updated: new Date().toISOString()\n  };\n});\n\nconsole.log(`✅ Processed ${processedRegistrants.length} registrants for sync`);\nconsole.log('Sample processed registrant:', processedRegistrants[0]);\n\nreturn processedRegistrants.map(reg => ({ json: reg }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ],
+      "id": "process-registrants",
+      "name": "Process Registrants - CORRECTED"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO webinar_registrants (\n  email, first_name, last_name, phone, webinar_id, schedule_id,\n  registration_date, webinar_date, timezone, live_room_url, \n  replay_room_url, thank_you_url, attended, attended_live, attended_replay,\n  event_id, lead_id, last_updated\n) VALUES (\n  $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18\n)\nON CONFLICT (email, webinar_id, schedule_id) \nDO UPDATE SET\n  first_name = EXCLUDED.first_name,\n  last_name = EXCLUDED.last_name,\n  phone = EXCLUDED.phone,\n  registration_date = EXCLUDED.registration_date,\n  webinar_date = EXCLUDED.webinar_date,\n  timezone = EXCLUDED.timezone,\n  live_room_url = EXCLUDED.live_room_url,\n  replay_room_url = EXCLUDED.replay_room_url,\n  thank_you_url = EXCLUDED.thank_you_url,\n  attended = EXCLUDED.attended,\n  attended_live = EXCLUDED.attended_live,\n  attended_replay = EXCLUDED.attended_replay,\n  event_id = EXCLUDED.event_id,\n  lead_id = EXCLUDED.lead_id,\n  last_updated = EXCLUDED.last_updated\nRETURNING id, email;",
+        "additionalFields": {
+          "mode": "multiple",
+          "queryParams": "={{ $json.email }},{{ $json.first_name }},{{ $json.last_name }},{{ $json.phone }},{{ $json.webinar_id }},{{ $json.schedule_id }},{{ $json.registration_date }},{{ $json.webinar_date }},{{ $json.timezone }},{{ $json.live_room_url }},{{ $json.replay_room_url }},{{ $json.thank_you_url }},{{ $json.attended }},{{ $json.attended_live }},{{ $json.attended_replay }},{{ $json.event_id }},{{ $json.lead_id }},{{ $json.last_updated }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        900,
+        300
+      ],
+      "id": "sync-to-supabase",
+      "name": "Sync to Supabase",
+      "credentials": {
+        "postgres": {
+          "id": "supabase-db",
+          "name": "Supabase Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-next-page",
+              "leftValue": "={{ $('Fetch EverWebinar Registrants').first().json.registrants.next_page_url }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        300
+      ],
+      "id": "check-next-page",
+      "name": "Has Next Page?"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Summary of sync operation\n */\n\nconst results = $input.all();\nconst successful = results.filter(r => r.json && !r.json.error).length;\nconst errors = results.filter(r => r.json && r.json.error).length;\n\nconst apiResponse = $('Fetch EverWebinar Registrants').first().json;\nconst totalPages = apiResponse?.registrants?.last_page || 1;\nconst currentPage = apiResponse?.registrants?.current_page || 1;\nconst totalRegistrants = apiResponse?.registrants?.total || 0;\n\nconsole.log(`📊 SYNC COMPLETE:`);\nconsole.log(`✅ Successful: ${successful}`);\nconsole.log(`❌ Errors: ${errors}`);\nconsole.log(`📄 Page: ${currentPage}/${totalPages}`);\nconsole.log(`👥 Total Registrants: ${totalRegistrants}`);\nconsole.log(`📅 Timestamp: ${new Date().toISOString()}`);\n\nreturn [{\n  json: {\n    sync_completed: true,\n    timestamp: new Date().toISOString(),\n    successful_syncs: successful,\n    errors: errors,\n    total_processed: results.length,\n    current_page: currentPage,\n    total_pages: totalPages,\n    total_registrants: totalRegistrants,\n    needs_pagination: totalPages > 1\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        400
+      ],
+      "id": "sync-summary",
+      "name": "Sync Summary"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Handle pagination - fetch next page if available\n * Note: This is a simplified version. For full pagination,\n * you'd need a loop or separate workflow trigger.\n */\n\nconst apiResponse = $('Fetch EverWebinar Registrants').first().json;\nconst nextPageUrl = apiResponse?.registrants?.next_page_url;\nconst currentPage = apiResponse?.registrants?.current_page || 1;\n\nif (nextPageUrl && currentPage < 3) { // Limit to first 3 pages for demo\n  console.log(`📄 Fetching next page: ${currentPage + 1}`);\n  \n  return [{\n    json: {\n      message: `Pagination needed - Page ${currentPage + 1}`,\n      next_page_url: nextPageUrl,\n      current_page: currentPage,\n      action_needed: 'Run workflow again with page parameter'\n    }\n  }];\n} else {\n  console.log(`✅ Pagination complete or limit reached`);\n  \n  return [{\n    json: {\n      message: 'All pages processed or limit reached',\n      final_page: currentPage,\n      pagination_complete: true\n    }\n  }];\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        200
+      ],
+      "id": "handle-pagination",
+      "name": "Handle Pagination"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every 6 Hours": {
+      "main": [
+        [
+          {
+            "node": "Fetch EverWebinar Registrants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch EverWebinar Registrants": {
+      "main": [
+        [
+          {
+            "node": "Process Registrants - CORRECTED",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Registrants - CORRECTED": {
+      "main": [
+        [
+          {
+            "node": "Sync to Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sync to Supabase": {
+      "main": [
+        [
+          {
+            "node": "Has Next Page?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Next Page?": {
+      "main": [
+        [
+          {
+            "node": "Handle Pagination",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Sync Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

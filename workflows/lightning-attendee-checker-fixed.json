@@ -1,0 +1,352 @@
+{
+  "name": "Lightning Attendee Checker - EverWebinar",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "attendee-check",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        300
+      ],
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "webhookId": "attendee-check-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Parse GoHighLevel webhook data for attendee checking\n * Expected format: { first_name, email, phone, contact_id, selected_label, webinar_date, webinar_id, schedule_id }\n */\n\nconst item = $input.first().json;\nconst body = item.body || item;\n\n// Extract data from webhook\nconst email = (body.email || '').toLowerCase().trim();\nconst first_name = body.first_name || '';\nconst phone = body.phone || '';\nconst contact_id = body.contact_id || '';\nconst webinar_id = parseInt(body.webinar_id) || 13;\nconst schedule_id = parseInt(body.schedule_id) || body.webinar_schedule_id || null;\n\n// Parse webinar date\nlet webinar_date = null;\nif (body.webinar_date) {\n  try {\n    webinar_date = new Date(body.webinar_date).toISOString();\n  } catch (e) {\n    console.log('Date parse error:', body.webinar_date);\n  }\n}\n\n// Parse Dutch date label if provided\nif (!webinar_date && body.selected_label) {\n  const label = body.selected_label.toString().trim();\n  const cleaned = label\n    .replace(/\\u00A0/g,' ')\n    .replace(/[\\u2013\\u2014]/g,'-')\n    .replace(/\\s*-\\s*/g,' - ')\n    .replace(/\\s+/g,' ')\n    .trim();\n  \n  const re = /^(?:[A-Za-zÀ-ÿ]+ )?(\\d{1,2})\\s+([A-Za-zÀ-ÿ]+)\\s+(\\d{4})\\s*-\\s*(\\d{1,2})[:.](\\d{2})$/u;\n  const m = cleaned.match(re);\n  \n  if (m) {\n    const [, dStr, maandStr, jaarStr, hhStr, mmStr] = m;\n    const maandMap = {\n      'januari':'01','februari':'02','maart':'03','april':'04',\n      'mei':'05','juni':'06','juli':'07','augustus':'08',\n      'september':'09','oktober':'10','november':'11','december':'12'\n    };\n    const month = maandMap[maandStr.toLowerCase()];\n    \n    if (month) {\n      const dd = String(parseInt(dStr,10)).padStart(2,'0');\n      const hh = String(parseInt(hhStr,10)).padStart(2,'0');\n      const mm = String(parseInt(mmStr,10)).padStart(2,'0');\n      const dateStr = `${jaarStr}-${month}-${dd}T${hh}:${mm}:00.000Z`;\n      \n      try {\n        webinar_date = new Date(dateStr).toISOString();\n      } catch (e) {\n        console.log('Parsed date error:', dateStr);\n      }\n    }\n  }\n}\n\nif (!email) {\n  return [{\n    json: {\n      error: 'No email provided',\n      received_data: body\n    }\n  }];\n}\n\nconsole.log(`🔍 Checking attendance for: ${email}`);\nconsole.log(`📅 Webinar date: ${webinar_date}`);\nconsole.log(`🆔 Webinar ID: ${webinar_id}, Schedule ID: ${schedule_id}`);\n\nreturn [{\n  json: {\n    email,\n    first_name,\n    phone,\n    contact_id,\n    webinar_id,\n    schedule_id,\n    webinar_date,\n    original_data: body\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ],
+      "id": "parse-webhook",
+      "name": "Parse Webhook Data"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  email,\n  first_name,\n  last_name,\n  phone,\n  webinar_id,\n  schedule_id,\n  webinar_date,\n  attended,\n  registration_date,\n  live_room_url,\n  replay_room_url\nFROM webinar_registrants \nWHERE email = $1 \n  AND webinar_id = $2\n  AND ($3::integer IS NULL OR schedule_id = $3)\nLIMIT 1;",
+        "additionalFields": {
+          "queryParams": "={{ $json.email }},{{ $json.webinar_id }},{{ $json.schedule_id }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        680,
+        300
+      ],
+      "id": "lightning-lookup",
+      "name": "⚡ Lightning Lookup",
+      "credentials": {
+        "postgres": {
+          "id": "supabase-db",
+          "name": "Supabase Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "found-registrant",
+              "leftValue": "={{ $json.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ],
+      "id": "check-found",
+      "name": "Found Registrant?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.webinarjam.com/everwebinar/registrants",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "api_key",
+              "value": "99bf85a4-2e67-46a3-8679-6612d4d6b1b2"
+            },
+            {
+              "name": "webinar_id",
+              "value": "={{ $('Parse Webhook Data').first().json.webinar_id }}"
+            },
+            {
+              "name": "email",
+              "value": "={{ $('Parse Webhook Data').first().json.email }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1120,
+        200
+      ],
+      "id": "check-attendance",
+      "name": "Check EverWebinar Attendance"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Determine attendance status from EverWebinar API response\n */\n\nconst apiResponse = $input.first().json;\nconst webhookData = $('Parse Webhook Data').first().json;\nconst dbResult = $('⚡ Lightning Lookup').first().json;\n\n// Check if registrant was found in EverWebinar\nconst registrants = apiResponse?.registrants || [];\nconst attendees = apiResponse?.attendees || [];\n\n// Look for the email in registrants\nconst registrant = registrants.find(r => \n  r.email && r.email.toLowerCase() === webhookData.email.toLowerCase()\n);\n\n// Look for the email in attendees (if they actually attended)\nconst attendee = attendees.find(a => \n  a.email && a.email.toLowerCase() === webhookData.email.toLowerCase()\n);\n\nconst attended = !!attendee;\nconst registered = !!registrant;\n\nconsole.log(`📊 ATTENDANCE CHECK RESULT:`);\nconsole.log(`📧 Email: ${webhookData.email}`);\nconsole.log(`✅ Registered: ${registered}`);\nconsole.log(`🎯 Attended: ${attended}`);\n\n// Determine tag to add\nlet tag_to_add = '';\nif (attended) {\n  tag_to_add = 'webinar-attended';\n} else if (registered) {\n  tag_to_add = 'webinar-no-show';\n} else {\n  tag_to_add = 'webinar-not-registered';\n}\n\nreturn [{\n  json: {\n    email: webhookData.email,\n    contact_id: webhookData.contact_id,\n    first_name: webhookData.first_name,\n    webinar_id: webhookData.webinar_id,\n    registered: registered,\n    attended: attended,\n    tag_to_add: tag_to_add,\n    registrant_data: registrant || null,\n    attendee_data: attendee || null,\n    db_data: dbResult || null,\n    check_timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        200
+      ],
+      "id": "determine-attendance",
+      "name": "Determine Attendance"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://services.leadconnectorhq.com/contacts/{{ $json.contact_id }}/tags",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Version",
+              "value": "2021-07-28"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "tags",
+              "value": "=[\"{{ $json.tag_to_add }}\"]"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1560,
+        200
+      ],
+      "id": "add-attendance-tag",
+      "name": "🏷️ Add Attendance Tag",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ghl-api",
+          "name": "GoHighLevel API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO attendance_logs (\n  email, contact_id, webinar_id, schedule_id, attended, \n  tag_added, check_timestamp, response_data\n) VALUES (\n  $1, $2, $3, $4, $5, $6, $7, $8\n) RETURNING id;",
+        "additionalFields": {
+          "queryParams": "={{ $('Determine Attendance').first().json.email }},={{ $('Determine Attendance').first().json.contact_id }},={{ $('Determine Attendance').first().json.webinar_id }},={{ $('Parse Webhook Data').first().json.schedule_id }},={{ $('Determine Attendance').first().json.attended }},={{ $('Determine Attendance').first().json.tag_to_add }},={{ $('Determine Attendance').first().json.check_timestamp }},={{ JSON.stringify($('Determine Attendance').first().json) }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1780,
+        200
+      ],
+      "id": "log-success",
+      "name": "📊 Log Success",
+      "credentials": {
+        "postgres": {
+          "id": "supabase-db",
+          "name": "Supabase Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO attendance_logs (\n  email, contact_id, webinar_id, schedule_id, attended, \n  tag_added, check_timestamp, error_message\n) VALUES (\n  $1, $2, $3, $4, false, 'error-not-found', $5, 'Registrant not found in database or EverWebinar'\n) RETURNING id;",
+        "additionalFields": {
+          "queryParams": "={{ $('Parse Webhook Data').first().json.email }},={{ $('Parse Webhook Data').first().json.contact_id }},={{ $('Parse Webhook Data').first().json.webinar_id }},={{ $('Parse Webhook Data').first().json.schedule_id }},={{ new Date().toISOString() }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1120,
+        400
+      ],
+      "id": "log-not-found",
+      "name": "📝 Log Not Found",
+      "credentials": {
+        "postgres": {
+          "id": "supabase-db",
+          "name": "Supabase Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Final response with performance metrics\n */\n\nconst startTime = $('Parse Webhook Data').first().json.original_data?.timestamp || Date.now();\nconst endTime = Date.now();\nconst processingTime = endTime - startTime;\n\nconst result = $input.first().json;\n\nconsole.log(`⚡ LIGHTNING FAST RESPONSE: ${processingTime}ms`);\n\nreturn [{\n  json: {\n    success: true,\n    processing_time_ms: processingTime,\n    email: result.email || $('Parse Webhook Data').first().json.email,\n    attended: result.attended || false,\n    tag_added: result.tag_to_add || result.tag_added || 'error-not-found',\n    timestamp: new Date().toISOString(),\n    message: result.attended ? \n      `✅ Attended - Tagged as ${result.tag_to_add}` : \n      `❌ No-show - Tagged as ${result.tag_to_add || 'error-not-found'}`\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        300
+      ],
+      "id": "final-response",
+      "name": "⚡ Final Response"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parse Webhook Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Webhook Data": {
+      "main": [
+        [
+          {
+            "node": "⚡ Lightning Lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "⚡ Lightning Lookup": {
+      "main": [
+        [
+          {
+            "node": "Found Registrant?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Found Registrant?": {
+      "main": [
+        [
+          {
+            "node": "Check EverWebinar Attendance",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "📝 Log Not Found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check EverWebinar Attendance": {
+      "main": [
+        [
+          {
+            "node": "Determine Attendance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Determine Attendance": {
+      "main": [
+        [
+          {
+            "node": "🏷️ Add Attendance Tag",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🏷️ Add Attendance Tag": {
+      "main": [
+        [
+          {
+            "node": "📊 Log Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📊 Log Success": {
+      "main": [
+        [
+          {
+            "node": "⚡ Final Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📝 Log Not Found": {
+      "main": [
+        [
+          {
+            "node": "⚡ Final Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

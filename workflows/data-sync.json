@@ -1,0 +1,428 @@
+{
+  "name": "WebinarJam → Supabase Data Sync",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "sync-trigger",
+      "name": "Sync Every 6 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.webinarjam.com/everwebinar/registrants",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/x-www-form-urlencoded"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "api_key",
+              "value": "={{ $credentials.webinarjam.apiKey }}"
+            },
+            {
+              "name": "webinar_id",
+              "value": "13"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000,
+          "retry": {
+            "enabled": true,
+            "maxTries": 3
+          }
+        }
+      },
+      "id": "fetch-registrants",
+      "name": "Fetch All Registrants",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        460,
+        300
+      ],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "webinarjam-api",
+          "name": "WebinarJam API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse WebinarJam API response and prepare for Supabase\nconst response = $input.first().json;\n\nif (!response.status || response.status !== 'success') {\n  throw new Error(`WebinarJam API Error: ${response.message || 'Unknown error'}`);\n}\n\nconst registrants = response.registrants || [];\nconst totalPages = Math.ceil((response.total_items || 0) / (response.per_page || 100));\n\nconsole.log(`Processing ${registrants.length} registrants from page 1 of ${totalPages}`);\n\n// Transform each registrant for Supabase\nconst transformedRegistrants = registrants.map(registrant => {\n  // Parse dates safely\n  const parseDate = (dateStr) => {\n    if (!dateStr || dateStr === '0000-00-00 00:00:00') return null;\n    try {\n      return new Date(dateStr).toISOString();\n    } catch (e) {\n      return null;\n    }\n  };\n\n  // Parse intervals (like \"01:23:45\" to PostgreSQL INTERVAL)\n  const parseInterval = (timeStr) => {\n    if (!timeStr || timeStr === '00:00:00') return null;\n    return timeStr; // PostgreSQL will handle HH:MM:SS format\n  };\n\n  return {\n    webinarjam_id: parseInt(registrant.id) || 0,\n    lead_id: parseInt(registrant.lead_id) || null,\n    webinar_id: parseInt(registrant.webinar_id) || 0,\n    schedule_id: parseInt(registrant.schedule_id) || 0,\n    event_id: parseInt(registrant.event_id) || null,\n    \n    // Contact Info\n    email: registrant.email || '',\n    first_name: registrant.first_name || '',\n    last_name: registrant.last_name || '',\n    phone_country_code: registrant.phone_country_code || null,\n    phone_number: registrant.phone_number || null,\n    \n    // Webinar Details\n    webinar_name: registrant.webinar_name || '',\n    schedule: registrant.schedule || '',\n    event_date: parseDate(registrant.event_date),\n    signup_date: parseDate(registrant.signup_date),\n    \n    // Attendance Status\n    attended_live: registrant.attended_live === '1' || registrant.attended_live === true,\n    date_live: parseDate(registrant.date_live),\n    entered_live: parseInterval(registrant.entered_live),\n    time_live: parseInterval(registrant.time_live),\n    \n    // Purchase Data\n    purchased_live: registrant.purchased_live === '1' || registrant.purchased_live === true,\n    revenue_live: parseFloat(registrant.revenue_live) || 0,\n    \n    // Replay Data\n    attended_replay: registrant.attended_replay === '1' || registrant.attended_replay === true,\n    date_replay: parseDate(registrant.date_replay),\n    time_replay: parseInterval(registrant.time_replay),\n    purchased_replay: registrant.purchased_replay === '1' || registrant.purchased_replay === true,\n    revenue_replay: parseFloat(registrant.revenue_replay) || 0,\n    \n    // Subscription Status\n    subscribed: registrant.subscribed !== '0' && registrant.subscribed !== false,\n    gdpr_status: registrant.gdpr_status || null,\n    gdpr_communications: registrant.gdpr_communications || null,\n    \n    // UTM Tracking\n    utm_source: registrant.utm_source || null,\n    utm_medium: registrant.utm_medium || null,\n    utm_campaign: registrant.utm_campaign || null,\n    utm_term: registrant.utm_term || null,\n    utm_content: registrant.utm_content || null\n  };\n});\n\nreturn {\n  registrants: transformedRegistrants,\n  pagination: {\n    current_page: 1,\n    total_pages: totalPages,\n    total_items: response.total_items || 0,\n    per_page: response.per_page || 100\n  },\n  sync_timestamp: new Date().toISOString()\n};"
+      },
+      "id": "transform-data",
+      "name": "Transform Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=-- Batch upsert registrants into Supabase\n{% for registrant in $json.registrants %}\nSELECT upsert_webinar_registrant(\n  {{ registrant.webinarjam_id }},\n  {% if registrant.lead_id %}{{ registrant.lead_id }}{% else %}NULL{% endif %},\n  {{ registrant.webinar_id }},\n  {{ registrant.schedule_id }},\n  {% if registrant.event_id %}{{ registrant.event_id }}{% else %}NULL{% endif %},\n  '{{ registrant.email | replace(\"'\", \"''\") }}',\n  '{{ registrant.first_name | replace(\"'\", \"''\") }}',\n  '{{ registrant.last_name | replace(\"'\", \"''\") }}',\n  {% if registrant.phone_country_code %}'{{ registrant.phone_country_code }}'{% else %}NULL{% endif %},\n  {% if registrant.phone_number %}'{{ registrant.phone_number }}'{% else %}NULL{% endif %},\n  '{{ registrant.webinar_name | replace(\"'\", \"''\") }}',\n  '{{ registrant.schedule | replace(\"'\", \"''\") }}',\n  {% if registrant.event_date %}'{{ registrant.event_date }}'{% else %}NULL{% endif %},\n  {% if registrant.signup_date %}'{{ registrant.signup_date }}'{% else %}NULL{% endif %},\n  {{ registrant.attended_live }},\n  {% if registrant.date_live %}'{{ registrant.date_live }}'{% else %}NULL{% endif %},\n  {% if registrant.entered_live %}'{{ registrant.entered_live }}'{% else %}NULL{% endif %},\n  {% if registrant.time_live %}'{{ registrant.time_live }}'{% else %}NULL{% endif %},\n  {{ registrant.purchased_live }},\n  {{ registrant.revenue_live }},\n  {{ registrant.attended_replay }},\n  {% if registrant.date_replay %}'{{ registrant.date_replay }}'{% else %}NULL{% endif %},\n  {% if registrant.time_replay %}'{{ registrant.time_replay }}'{% else %}NULL{% endif %},\n  {{ registrant.purchased_replay }},\n  {{ registrant.revenue_replay }},\n  {{ registrant.subscribed }},\n  {% if registrant.gdpr_status %}'{{ registrant.gdpr_status | replace(\"'\", \"''\") }}'{% else %}NULL{% endif %},\n  {% if registrant.gdpr_communications %}'{{ registrant.gdpr_communications | replace(\"'\", \"''\") }}'{% else %}NULL{% endif %},\n  {% if registrant.utm_source %}'{{ registrant.utm_source | replace(\"'\", \"''\") }}'{% else %}NULL{% endif %},\n  {% if registrant.utm_medium %}'{{ registrant.utm_medium | replace(\"'\", \"''\") }}'{% else %}NULL{% endif %},\n  {% if registrant.utm_campaign %}'{{ registrant.utm_campaign | replace(\"'\", \"''\") }}'{% else %}NULL{% endif %},\n  {% if registrant.utm_term %}'{{ registrant.utm_term | replace(\"'\", \"''\") }}'{% else %}NULL{% endif %},\n  {% if registrant.utm_content %}'{{ registrant.utm_content | replace(\"'\", \"''\") }}'{% else %}NULL{% endif %}\n) as upserted_id;\n{% endfor %}",
+        "options": {}
+      },
+      "id": "sync-to-supabase",
+      "name": "Sync to Supabase",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        900,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "supabase-db",
+          "name": "Supabase Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-more-pages",
+              "leftValue": "={{ $('transform-data').item.json.pagination.total_pages }}",
+              "rightValue": 1,
+              "operator": {
+                "type": "number",
+                "operation": "gt",
+                "rightType": "number"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-pagination",
+      "name": "More Pages?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Create pagination loop for remaining pages\nconst pagination = $('transform-data').item.json.pagination;\nconst totalPages = pagination.total_pages;\nconst startPage = 2; // We already processed page 1\n\nconst pageRequests = [];\n\nfor (let page = startPage; page <= totalPages; page++) {\n  pageRequests.push({\n    page: page,\n    total_pages: totalPages\n  });\n}\n\nconsole.log(`Creating ${pageRequests.length} additional page requests (pages ${startPage}-${totalPages})`);\n\nreturn pageRequests.map(req => ({ json: req }));"
+      },
+      "id": "create-page-requests",
+      "name": "Create Page Requests",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.webinarjam.com/everwebinar/registrants",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/x-www-form-urlencoded"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "api_key",
+              "value": "={{ $credentials.webinarjam.apiKey }}"
+            },
+            {
+              "name": "webinar_id",
+              "value": "13"
+            },
+            {
+              "name": "page",
+              "value": "={{ $json.page }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 60000,
+          "retry": {
+            "enabled": true,
+            "maxTries": 3
+          }
+        }
+      },
+      "id": "fetch-additional-pages",
+      "name": "Fetch Additional Pages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1560,
+        200
+      ],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "webinarjam-api",
+          "name": "WebinarJam API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Transform additional page data for Supabase\nconst response = $input.item.json;\n\nif (!response.status || response.status !== 'success') {\n  console.log(`Warning: Page ${$input.item.json.page || 'unknown'} failed: ${response.message || 'Unknown error'}`);\n  return { json: { registrants: [], page: $input.item.json.page || 0 } };\n}\n\nconst registrants = response.registrants || [];\nconst currentPage = response.current_page || $input.item.json.page || 0;\n\nconsole.log(`Processing ${registrants.length} registrants from page ${currentPage}`);\n\n// Transform each registrant for Supabase (same logic as main transform)\nconst transformedRegistrants = registrants.map(registrant => {\n  const parseDate = (dateStr) => {\n    if (!dateStr || dateStr === '0000-00-00 00:00:00') return null;\n    try {\n      return new Date(dateStr).toISOString();\n    } catch (e) {\n      return null;\n    }\n  };\n\n  const parseInterval = (timeStr) => {\n    if (!timeStr || timeStr === '00:00:00') return null;\n    return timeStr;\n  };\n\n  return {\n    webinarjam_id: parseInt(registrant.id) || 0,\n    lead_id: parseInt(registrant.lead_id) || null,\n    webinar_id: parseInt(registrant.webinar_id) || 0,\n    schedule_id: parseInt(registrant.schedule_id) || 0,\n    event_id: parseInt(registrant.event_id) || null,\n    \n    email: registrant.email || '',\n    first_name: registrant.first_name || '',\n    last_name: registrant.last_name || '',\n    phone_country_code: registrant.phone_country_code || null,\n    phone_number: registrant.phone_number || null,\n    \n    webinar_name: registrant.webinar_name || '',\n    schedule: registrant.schedule || '',\n    event_date: parseDate(registrant.event_date),\n    signup_date: parseDate(registrant.signup_date),\n    \n    attended_live: registrant.attended_live === '1' || registrant.attended_live === true,\n    date_live: parseDate(registrant.date_live),\n    entered_live: parseInterval(registrant.entered_live),\n    time_live: parseInterval(registrant.time_live),\n    \n    purchased_live: registrant.purchased_live === '1' || registrant.purchased_live === true,\n    revenue_live: parseFloat(registrant.revenue_live) || 0,\n    \n    attended_replay: registrant.attended_replay === '1' || registrant.attended_replay === true,\n    date_replay: parseDate(registrant.date_replay),\n    time_replay: parseInterval(registrant.time_replay),\n    purchased_replay: registrant.purchased_replay === '1' || registrant.purchased_replay === true,\n    revenue_replay: parseFloat(registrant.revenue_replay) || 0,\n    \n    subscribed: registrant.subscribed !== '0' && registrant.subscribed !== false,\n    gdpr_status: registrant.gdpr_status || null,\n    gdpr_communications: registrant.gdpr_communications || null,\n    \n    utm_source: registrant.utm_source || null,\n    utm_medium: registrant.utm_medium || null,\n    utm_campaign: registrant.utm_campaign || null,\n    utm_term: registrant.utm_term || null,\n    utm_content: registrant.utm_content || null\n  };\n});\n\nreturn {\n  json: {\n    registrants: transformedRegistrants,\n    page: currentPage\n  }\n};"
+      },
+      "id": "transform-additional-pages",
+      "name": "Transform Additional Pages",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=-- Batch upsert additional page registrants\n{% for registrant in $json.registrants %}\nSELECT upsert_webinar_registrant(\n  {{ registrant.webinarjam_id }},\n  {% if registrant.lead_id %}{{ registrant.lead_id }}{% else %}NULL{% endif %},\n  {{ registrant.webinar_id }},\n  {{ registrant.schedule_id }},\n  {% if registrant.event_id %}{{ registrant.event_id }}{% else %}NULL{% endif %},\n  '{{ registrant.email | replace(\"'\", \"''\") }}',\n  '{{ registrant.first_name | replace(\"'\", \"''\") }}',\n  '{{ registrant.last_name | replace(\"'\", \"''\") }}',\n  {% if registrant.phone_country_code %}'{{ registrant.phone_country_code }}'{% else %}NULL{% endif %},\n  {% if registrant.phone_number %}'{{ registrant.phone_number }}'{% else %}NULL{% endif %},\n  '{{ registrant.webinar_name | replace(\"'\", \"''\") }}',\n  '{{ registrant.schedule | replace(\"'\", \"''\") }}',\n  {% if registrant.event_date %}'{{ registrant.event_date }}'{% else %}NULL{% endif %},\n  {% if registrant.signup_date %}'{{ registrant.signup_date }}'{% else %}NULL{% endif %},\n  {{ registrant.attended_live }},\n  {% if registrant.date_live %}'{{ registrant.date_live }}'{% else %}NULL{% endif %},\n  {% if registrant.entered_live %}'{{ registrant.entered_live }}'{% else %}NULL{% endif %},\n  {% if registrant.time_live %}'{{ registrant.time_live }}'{% else %}NULL{% endif %},\n  {{ registrant.purchased_live }},\n  {{ registrant.revenue_live }},\n  {{ registrant.attended_replay }},\n  {% if registrant.date_replay %}'{{ registrant.date_replay }}'{% else %}NULL{% endif %},\n  {% if registrant.time_replay %}'{{ registrant.time_replay }}'{% else %}NULL{% endif %},\n  {{ registrant.purchased_replay }},\n  {{ registrant.revenue_replay }},\n  {{ registrant.subscribed }},\n  {% if registrant.gdpr_status %}'{{ registrant.gdpr_status | replace(\"'\", \"''\") }}'{% else %}NULL{% endif %},\n  {% if registrant.gdpr_communications %}'{{ registrant.gdpr_communications | replace(\"'\", \"''\") }}'{% else %}NULL{% endif %},\n  {% if registrant.utm_source %}'{{ registrant.utm_source | replace(\"'\", \"''\") }}'{% else %}NULL{% endif %},\n  {% if registrant.utm_medium %}'{{ registrant.utm_medium | replace(\"'\", \"''\") }}'{% else %}NULL{% endif %},\n  {% if registrant.utm_campaign %}'{{ registrant.utm_campaign | replace(\"'\", \"''\") }}'{% else %}NULL{% endif %},\n  {% if registrant.utm_term %}'{{ registrant.utm_term | replace(\"'\", \"''\") }}'{% else %}NULL{% endif %},\n  {% if registrant.utm_content %}'{{ registrant.utm_content | replace(\"'\", \"''\") }}'{% else %}NULL{% endif %}\n) as upserted_id_page_{{ $json.page }};\n{% endfor %}",
+        "options": {}
+      },
+      "id": "sync-additional-pages",
+      "name": "Sync Additional Pages",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        2000,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "supabase-db",
+          "name": "Supabase Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Final sync summary\nSELECT \n  COUNT(*) as total_synced,\n  COUNT(CASE WHEN attended_live THEN 1 END) as attended_count,\n  COUNT(CASE WHEN NOT attended_live THEN 1 END) as no_show_count,\n  MAX(last_synced_at) as last_sync_time,\n  webinar_name\nFROM webinar_registrants \nWHERE webinar_id = 13\nGROUP BY webinar_name;",
+        "options": {}
+      },
+      "id": "sync-summary",
+      "name": "Sync Summary",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1340,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "supabase-db",
+          "name": "Supabase Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Create comprehensive sync report\nconst syncSummary = $('sync-summary').first().json;\nconst initialSync = $('sync-to-supabase').first().json;\nconst additionalPagesResult = $('sync-additional-pages').all();\n\nconst report = {\n  sync_completed_at: new Date().toISOString(),\n  webinar_id: 13,\n  total_registrants_synced: syncSummary.total_synced || 0,\n  attended_live_count: syncSummary.attended_count || 0,\n  no_show_count: syncSummary.no_show_count || 0,\n  attendance_rate: syncSummary.total_synced > 0 ? \n    Math.round((syncSummary.attended_count / syncSummary.total_synced) * 100 * 100) / 100 : 0,\n  webinar_name: syncSummary.webinar_name || 'Unknown Webinar',\n  pages_processed: 1 + (additionalPagesResult?.length || 0),\n  database_ready: true,\n  next_sync_in: '6 hours'\n};\n\nconsole.log('📊 SYNC COMPLETED');\nconsole.log(`✅ ${report.total_registrants_synced} registrants synced`);\nconsole.log(`👥 ${report.attended_live_count} attended live (${report.attendance_rate}%)`);\nconsole.log(`❌ ${report.no_show_count} no-shows`);\nconsole.log(`📄 ${report.pages_processed} pages processed`);\nconsole.log(`🔄 Next sync in ${report.next_sync_in}`);\n\nreturn { json: report };"
+      },
+      "id": "final-report",
+      "name": "Final Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        400
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "sync-trigger": {
+      "main": [
+        [
+          {
+            "node": "fetch-registrants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "fetch-registrants": {
+      "main": [
+        [
+          {
+            "node": "transform-data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "transform-data": {
+      "main": [
+        [
+          {
+            "node": "sync-to-supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "sync-to-supabase": {
+      "main": [
+        [
+          {
+            "node": "check-pagination",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "check-pagination": {
+      "main": [
+        [
+          {
+            "node": "create-page-requests",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "sync-summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "create-page-requests": {
+      "main": [
+        [
+          {
+            "node": "fetch-additional-pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "fetch-additional-pages": {
+      "main": [
+        [
+          {
+            "node": "transform-additional-pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "transform-additional-pages": {
+      "main": [
+        [
+          {
+            "node": "sync-additional-pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "sync-additional-pages": {
+      "main": [
+        [
+          {
+            "node": "sync-summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "sync-summary": {
+      "main": [
+        [
+          {
+            "node": "final-report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "sync-v1.0",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "id": "webinarjam-supabase-sync",
+  "tags": [
+    {
+      "createdAt": "2024-01-01T00:00:00.000Z",
+      "updatedAt": "2024-01-01T00:00:00.000Z",
+      "id": "data-sync",
+      "name": "data-sync"
+    },
+    {
+      "createdAt": "2024-01-01T00:00:00.000Z", 
+      "updatedAt": "2024-01-01T00:00:00.000Z",
+      "id": "webinarjam",
+      "name": "webinarjam"
+    },
+    {
+      "createdAt": "2024-01-01T00:00:00.000Z",
+      "updatedAt": "2024-01-01T00:00:00.000Z", 
+      "id": "supabase",
+      "name": "supabase"
+    }
+  ]
+}

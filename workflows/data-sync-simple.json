@@ -1,0 +1,192 @@
+{
+  "name": "EverWebinar Data Sync - SIMPLE",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ],
+      "id": "schedule-trigger",
+      "name": "Every 6 Hours"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.webinarjam.com/everwebinar/registrants",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "api_key",
+              "value": "99bf85a4-2e67-46a3-8679-6612d4d6b1b2"
+            },
+            {
+              "name": "webinar_id",
+              "value": "13"
+            },
+            {
+              "name": "page",
+              "value": "1"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        460,
+        300
+      ],
+      "id": "fetch-registrants",
+      "name": "Fetch EverWebinar Registrants"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Process EverWebinar registrants and sync to Supabase\n * This combines processing and database sync in one node\n */\n\nconst response = $input.first().json;\nconsole.log('🔍 Processing EverWebinar API Response');\n\n// Access registrants.data from the API response\nconst registrantsData = response?.registrants?.data || [];\n\nif (!Array.isArray(registrantsData) || registrantsData.length === 0) {\n  console.log('❌ No registrants found in response');\n  return [{ json: { message: 'No registrants found', total: 0 } }];\n}\n\nconsole.log(`✅ Found ${registrantsData.length} registrants to process`);\n\n// Process each registrant\nconst processedRegistrants = [];\n\nfor (const reg of registrantsData) {\n  // Parse registration date (signup_date)\n  let registrationDate = null;\n  if (reg.signup_date) {\n    try {\n      registrationDate = new Date(reg.signup_date).toISOString();\n    } catch (e) {\n      console.log('Date parse error for signup_date:', reg.signup_date);\n    }\n  }\n\n  // Parse webinar event date\n  let webinarDate = null;\n  if (reg.event) {\n    try {\n      const eventDate = new Date(reg.event);\n      if (!isNaN(eventDate.getTime())) {\n        webinarDate = eventDate.toISOString();\n      }\n    } catch (e) {\n      console.log('Event date parse error for:', reg.event);\n    }\n  }\n\n  // Combine phone country code and number\n  let fullPhone = '';\n  if (reg.phone_country_code && reg.phone_number) {\n    fullPhone = reg.phone_country_code + reg.phone_number;\n  } else if (reg.phone_number) {\n    fullPhone = reg.phone_number;\n  }\n\n  // Determine attendance status\n  const attendedLive = reg.attended_live === 'Yes';\n  const attendedReplay = reg.attended_replay === 'Yes';\n  const attended = attendedLive || attendedReplay;\n\n  const processedReg = {\n    email: (reg.email || '').toLowerCase().trim(),\n    first_name: reg.first_name || '',\n    last_name: reg.last_name || '',\n    phone: fullPhone,\n    webinar_id: 13,\n    schedule_id: parseInt(reg.schedule_id) || 46,\n    registration_date: registrationDate,\n    webinar_date: webinarDate,\n    timezone: 'Europe/Amsterdam',\n    live_room_url: reg.links?.live_room || '',\n    replay_room_url: reg.links?.replay_room || '',\n    thank_you_url: '',\n    attended: attended,\n    attended_live: attendedLive,\n    attended_replay: attendedReplay,\n    event_id: parseInt(reg.event_id) || null,\n    lead_id: parseInt(reg.lead_id) || null,\n    last_updated: new Date().toISOString()\n  };\n  \n  processedRegistrants.push(processedReg);\n}\n\nconsole.log(`✅ Processed ${processedRegistrants.length} registrants`);\n\n// Return all processed registrants for the next node\nreturn processedRegistrants.map(reg => ({ json: reg }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ],
+      "id": "process-registrants",
+      "name": "Process Registrants"
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "webinar_registrants",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "email": "={{ $json.email }}",
+            "first_name": "={{ $json.first_name }}",
+            "last_name": "={{ $json.last_name }}",
+            "phone": "={{ $json.phone }}",
+            "webinar_id": "={{ $json.webinar_id }}",
+            "schedule_id": "={{ $json.schedule_id }}",
+            "registration_date": "={{ $json.registration_date }}",
+            "webinar_date": "={{ $json.webinar_date }}",
+            "timezone": "={{ $json.timezone }}",
+            "live_room_url": "={{ $json.live_room_url }}",
+            "replay_room_url": "={{ $json.replay_room_url }}",
+            "thank_you_url": "={{ $json.thank_you_url }}",
+            "attended": "={{ $json.attended }}",
+            "attended_live": "={{ $json.attended_live }}",
+            "attended_replay": "={{ $json.attended_replay }}",
+            "event_id": "={{ $json.event_id }}",
+            "lead_id": "={{ $json.lead_id }}",
+            "last_updated": "={{ $json.last_updated }}"
+          }
+        },
+        "onConflict": "upsert",
+        "conflictColumns": {
+          "mappingMode": "defineBelow",
+          "value": [
+            "email",
+            "webinar_id", 
+            "schedule_id"
+          ]
+        },
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        900,
+        300
+      ],
+      "id": "sync-to-supabase",
+      "name": "Sync to Supabase",
+      "credentials": {
+        "postgres": {
+          "id": "supabase-db",
+          "name": "Supabase Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Summary of sync operation\n */\n\nconst results = $input.all();\nconst successful = results.filter(r => r.json && !r.json.error).length;\nconst errors = results.filter(r => r.json && r.json.error).length;\n\nconst apiResponse = $('Fetch EverWebinar Registrants').first().json;\nconst totalPages = apiResponse?.registrants?.last_page || 1;\nconst currentPage = apiResponse?.registrants?.current_page || 1;\nconst totalRegistrants = apiResponse?.registrants?.total || 0;\n\nconsole.log(`📊 SYNC COMPLETE:`);\nconsole.log(`✅ Successful: ${successful}`);\nconsole.log(`❌ Errors: ${errors}`);\nconsole.log(`📄 Page: ${currentPage}/${totalPages}`);\nconsole.log(`👥 Total Registrants: ${totalRegistrants}`);\nconsole.log(`📅 Timestamp: ${new Date().toISOString()}`);\n\nreturn [{\n  json: {\n    sync_completed: true,\n    timestamp: new Date().toISOString(),\n    successful_syncs: successful,\n    errors: errors,\n    total_processed: results.length,\n    current_page: currentPage,\n    total_pages: totalPages,\n    total_registrants: totalRegistrants,\n    needs_pagination: totalPages > 1\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        300
+      ],
+      "id": "sync-summary",
+      "name": "Sync Summary"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every 6 Hours": {
+      "main": [
+        [
+          {
+            "node": "Fetch EverWebinar Registrants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch EverWebinar Registrants": {
+      "main": [
+        [
+          {
+            "node": "Process Registrants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Registrants": {
+      "main": [
+        [
+          {
+            "node": "Sync to Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sync to Supabase": {
+      "main": [
+        [
+          {
+            "node": "Sync Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}
