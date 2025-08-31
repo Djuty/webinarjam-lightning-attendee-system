@@ -1,4 +1,4 @@
-# 🚀 WebinarJam → GoHighLevel Lightning Attendee Checker
+# 🚀 Everwebinar → GoHighLevel Lightning Attendee Checker
 
 **Ultra-fast Supabase-powered attendance tracking system**
 
